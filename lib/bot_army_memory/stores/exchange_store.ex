@@ -19,8 +19,10 @@ defmodule BotArmyMemory.Stores.ExchangeStore do
     tenant_id = Map.get(opts, "tenant_id")
     limit = Map.get(opts, "limit", 10)
 
-    query = from e in Exchange,
-      where: e.session_id == ^session_id
+    query =
+      from(e in Exchange,
+        where: e.session_id == ^session_id
+      )
 
     query = if tenant_id, do: where(query, [e], e.tenant_id == ^tenant_id), else: query
 
@@ -35,8 +37,10 @@ defmodule BotArmyMemory.Stores.ExchangeStore do
   def clear(session_id, opts \\ %{}) when is_map(opts) do
     tenant_id = Map.get(opts, "tenant_id")
 
-    query = from e in Exchange,
-      where: e.session_id == ^session_id
+    query =
+      from(e in Exchange,
+        where: e.session_id == ^session_id
+      )
 
     query = if tenant_id, do: where(query, [e], e.tenant_id == ^tenant_id), else: query
 

@@ -58,6 +58,7 @@ defmodule BotArmyMemory.NATS.Consumer do
 
   defp connect_and_subscribe(conn, state) do
     Connection.subscribe_to_status()
+
     subscriptions =
       Enum.map(@subjects, fn %{subject: subject} ->
         subscribe_to_subject(conn, subject)
@@ -69,7 +70,9 @@ defmodule BotArmyMemory.NATS.Consumer do
 
   defp subscribe_to_subject(conn, subject) do
     case Gnat.sub(conn, self(), subject) do
-      {:ok, sub} -> sub
+      {:ok, sub} ->
+        sub
+
       {:error, reason} ->
         Logger.error("[Memory Consumer] Sub failed #{subject}: #{inspect(reason)}")
         nil
@@ -161,7 +164,7 @@ defmodule BotArmyMemory.NATS.Consumer do
 
     case ExchangeStore.record(attrs) do
       {:ok, exchange} -> {:ok, %{"id" => exchange.id}}
-      {:error, reason} -> {:error, reason}
+      other -> {:error, inspect(other)}
     end
   end
 
@@ -169,20 +172,17 @@ defmodule BotArmyMemory.NATS.Consumer do
     session_id = body["session_id"]
     opts = body["opts"] || %{}
 
-    case ExchangeStore.list(session_id, opts) do
-      {:ok, history} -> {:ok, history}
-      {:error, reason} -> {:error, reason}
-    end
+    # list/2 only returns {:ok, history}; DB failures raise and are caught
+    # by safe_process above.
+    {:ok, ExchangeStore.list(session_id, opts)}
   end
 
   defp handle_clear(body) do
     session_id = body["session_id"]
     opts = body["opts"] || %{}
 
-    case ExchangeStore.clear(session_id, opts) do
-      {:ok, count} -> {:ok, %{"deleted" => count}}
-      _ -> {:ok, %{"status" => "cleared"}}
-    end
+    {:ok, count} = ExchangeStore.clear(session_id, opts)
+    {:ok, %{"deleted" => count}}
   end
 
   defp handle_append(body) do

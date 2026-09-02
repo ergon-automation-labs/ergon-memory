@@ -14,11 +14,11 @@ defmodule BotArmyMemory.Schemas.Soul do
   @primary_key {:id, :binary_id, autogenerate: true}
 
   schema "souls" do
-    field :bot_id, :string
-    field :tenant_id, :binary_id
-    field :config, :map, default: %{}
-    field :version, :integer, default: 1
-    field :active, :boolean, default: true
+    field(:bot_id, :string)
+    field(:tenant_id, :binary_id)
+    field(:config, :map, default: %{})
+    field(:version, :integer, default: 1)
+    field(:active, :boolean, default: true)
 
     timestamps(type: :utc_datetime)
   end
@@ -35,8 +35,8 @@ defmodule BotArmyMemory.Schemas.Soul do
   defp validate_jsonb_config(changeset) do
     config =
       case fetch_field(changeset, :config) do
-        {:ok, c} -> c
         {:changes, c} -> c
+        {:data, c} -> c
         :error -> nil
       end
 
