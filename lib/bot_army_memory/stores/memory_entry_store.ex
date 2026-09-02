@@ -8,6 +8,7 @@ defmodule BotArmyMemory.Stores.MemoryEntryStore do
   window rather than an ever-growing table.
   """
 
+  alias BotArmyLibraryRuntime.Tenant
   alias BotArmyMemory.Repo
 
   @doc """
@@ -66,7 +67,9 @@ defmodule BotArmyMemory.Stores.MemoryEntryStore do
   filtered by tenant and kind. Entries are plain maps.
   """
   def list(scope, opts \\ %{}) when is_map(opts) do
-    tenant_id = Map.get(opts, "tenant_id")
+    # Appends always stamp a tenant (the consumer defaults it), so reads
+    # must default too — tenant_id = NULL would match nothing.
+    tenant_id = Map.get(opts, "tenant_id") || Tenant.default_tenant_id()
     kind = Map.get(opts, "kind", "thought")
     limit = Map.get(opts, "limit", 10)
 
@@ -98,7 +101,7 @@ defmodule BotArmyMemory.Stores.MemoryEntryStore do
   Returns {:ok, deleted_count} | {:error, reason}.
   """
   def clear(scope, opts \\ %{}) when is_map(opts) do
-    tenant_id = Map.get(opts, "tenant_id")
+    tenant_id = Map.get(opts, "tenant_id") || Tenant.default_tenant_id()
     kind = Map.get(opts, "kind")
 
     {query, tail_params} =
@@ -154,12 +157,20 @@ defmodule BotArmyMemory.Stores.MemoryEntryStore do
     cols
     |> Enum.zip(row)
     |> Enum.into(%{}, fn
-      {"recorded_at", %DateTime{} = dt} -> {"at", DateTime.to_iso8601(dt)}
-      {"recorded_at", %NaiveDateTime{} = dt} -> {"at", NaiveDateTime.to_iso8601(dt)}
+      {"recorded_at", %DateTime{} = dt} ->
+        {"at", DateTime.to_iso8601(dt)}
+
+      {"recorded_at", %NaiveDateTime{} = dt} ->
+        {"at", NaiveDateTime.to_iso8601(dt)}
+
       {"tenant_id", binary} when is_binary(binary) and byte_size(binary) == 16 ->
         {"tenant_id", Ecto.UUID.load!(binary)}
-      {"payload", %DateTime{} = dt} -> {"payload", DateTime.to_iso8601(dt)}
-      {k, v} -> {k, v}
+
+      {"payload", %DateTime{} = dt} ->
+        {"payload", DateTime.to_iso8601(dt)}
+
+      {k, v} ->
+        {k, v}
     end)
   end
 end
