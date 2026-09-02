@@ -12,11 +12,9 @@ defmodule BotArmyMemory.Application do
 
   use Application
 
-  @env Mix.env()
-
   @impl true
   def start(_type, _args) do
-    # Note: BotArmyRuntime.Telemetry and BotArmyRuntime.NATS.Connection are started
+    # Note: BotArmyLibraryRuntime.Telemetry and BotArmyLibraryRuntime.NATS.Connection are started
     # by bot_army_runtime automatically — do not add them here.
 
     children =
@@ -29,8 +27,12 @@ defmodule BotArmyMemory.Application do
     Supervisor.start_link(children, opts)
   end
 
+  defp env do
+    System.get_env("MIX_ENV") || "dev"
+  end
+
   defp maybe_add_repo(children) do
-    if @env == :test do
+    if env() == "test" do
       children
     else
       [{BotArmyMemory.Repo, []} | children]
@@ -38,7 +40,7 @@ defmodule BotArmyMemory.Application do
   end
 
   defp maybe_add_pulse_publisher(children) do
-    if @env == :test do
+    if env() == "test" do
       children
     else
       [{BotArmyMemory.PulsePublisher, []} | children]
@@ -46,12 +48,12 @@ defmodule BotArmyMemory.Application do
   end
 
   defp maybe_add_workers(children) do
-    if @env == :test do
+    if env() == "test" do
       children
     else
       # Bot-specific workers and pollers go here (GenServers that do async work)
       # Examples: Scheduler, Poller, Watcher
-      # Pattern: gated with if @env == :test to prevent long-running processes in test
+      # Pattern: gated with if env() == "test" to prevent long-running processes in test
       children
     end
   end

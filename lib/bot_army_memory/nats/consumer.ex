@@ -1,78 +1,78 @@
 defmodule BotArmyMemory.NATS.Consumer do
   @moduledoc """
-  NATS message consumer for memory.
+  NATS message consumer for the Memory bot.
 
-  Subscribes to NATS subjects and routes messages to handlers.
-  Uses standardized Reply format for request/reply patterns.
+  Serves the centralized memory + soul surface:
 
-  All request/reply handlers should return responses using Reply helpers:
-  - BotArmyRuntime.NATS.Reply.ok(data) for success
-  - BotArmyRuntime.NATS.Reply.error(message, code) for errors
+    memory.record   Q/A exchange recording (publish or request-reply)
+    memory.list     conversation history for a session
+    memory.clear    drop a session's exchanges
+    memory.append   general session context note (kind/payload, trimmed)
+    memory.entries  read back a session's appended entries
+    soul.get        active personality config for a bot
+    soul.upsert     store a new versioned personality config
+
+  Messages WITH a reply_to get request-reply handling; messages without
+  one (fire-and-forget publishes, e.g. Memory.record_exchange/4) are
+  processed with errors logged — they are NOT silently dropped.
   """
 
   use GenServer
   require Logger
 
-  @reconnect_delay_ms 5000
-  @version Mix.Project.config()[:version]
+  alias BotArmyLibraryRuntime.NATS.{Connection, Reply}
+  alias BotArmyLibraryRuntime.Tenant
+  alias BotArmyMemory.Stores.{ExchangeStore, MemoryEntryStore, SoulStore}
 
-  # Register subjects with their metadata for runtime discovery
   @subjects [
-    # Add your subjects here:
-    # %{subject: "example.task.list", type: :request_reply, description: "List tasks"},
-    # %{subject: "example.event.>", type: :subscribe, description: "Example events"}
+    %{subject: "memory.record", type: :request_reply},
+    %{subject: "memory.list", type: :request_reply},
+    %{subject: "memory.clear", type: :request_reply},
+    %{subject: "memory.append", type: :request_reply},
+    %{subject: "memory.entries", type: :request_reply},
+    %{subject: "soul.get", type: :request_reply},
+    %{subject: "soul.upsert", type: :request_reply}
   ]
 
-  def start_link(opts) do
+  def start_link(opts \\ []) do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
   end
 
   @impl true
-  def init(opts) do
-    Logger.info("Starting NATS consumer")
-
-    state = %{
-      subscriptions: [],
-      conn: nil,
-      opts: opts
-    }
-
-    {:ok, state, {:continue, :connect}}
+  def init(_opts) do
+    {:ok, %{subscriptions: [], conn: nil}, {:continue, :connect}}
   end
 
   @impl true
   def handle_continue(:connect, state) do
-    case GenServer.call(BotArmyRuntime.NATS.Connection, :get_connection, 5000) do
+    case GenServer.call(Connection, :get_connection, 5000) do
       {:ok, conn} ->
-        BotArmyRuntime.NATS.Connection.subscribe_to_status()
-        Logger.info("Connected to NATS, subscribing to topics")
+        {:noreply, connect_and_subscribe(conn, state)}
 
-        subscriptions =
-          [
-            # Add your subjects here
-          ]
-          |> Enum.map(fn subject ->
-            case Gnat.sub(conn, self(), subject) do
-              {:ok, sub} ->
-                Logger.info("Subscribed to #{subject}")
-                sub
-
-              {:error, reason} ->
-                Logger.error("Failed to subscribe to #{subject}: #{inspect(reason)}")
-                nil
-            end
-          end)
-          |> Enum.filter(&(not is_nil(&1)))
-
-        # Register subjects for runtime discovery
-        BotArmyRuntime.Registry.register("memory", @subjects, @version)
-
-        {:noreply, %{state | subscriptions: subscriptions, conn: conn}}
-
-      {:error, _reason} ->
-        Logger.warning("NATS connection not ready, will retry")
-        Process.send_after(self(), :connect_retry, @reconnect_delay_ms)
+      {:error, reason} ->
+        Logger.warning("[Memory Consumer] Connection not ready (#{inspect(reason)}), retrying")
+        Process.send_after(self(), :connect_retry, 5000)
         {:noreply, state}
+    end
+  end
+
+  defp connect_and_subscribe(conn, state) do
+    Connection.subscribe_to_status()
+    subscriptions =
+      Enum.map(@subjects, fn %{subject: subject} ->
+        subscribe_to_subject(conn, subject)
+      end)
+      |> Enum.reject(&is_nil/1)
+
+    %{state | subscriptions: subscriptions, conn: conn}
+  end
+
+  defp subscribe_to_subject(conn, subject) do
+    case Gnat.sub(conn, self(), subject) do
+      {:ok, sub} -> sub
+      {:error, reason} ->
+        Logger.error("[Memory Consumer] Sub failed #{subject}: #{inspect(reason)}")
+        nil
     end
   end
 
@@ -83,70 +83,171 @@ defmodule BotArmyMemory.NATS.Consumer do
 
   @impl true
   def handle_info({:msg, msg}, state) do
-    BotArmyRuntime.Tracing.with_consumer_span(msg.topic, Map.get(msg, :headers), fn ->
-      Logger.debug("Received NATS message on subject: #{msg.topic}")
-
-      # Handle request/reply patterns
-      if msg.reply_to do
-        case msg.topic do
-          # Add your request/reply handlers here
-          # "example.task.list" ->
-          #   handle_task_list(msg, state)
-          _ ->
-            Logger.debug("Unknown request/reply subject: #{msg.topic}")
-        end
-      else
-        # Handle pub/sub messages
-        case BotArmyCore.NATS.Decoder.decode(msg.body) do
-          {:ok, decoded_message} ->
-            route_message(decoded_message, msg.topic)
-
-          {:error, reason} ->
-            Logger.warning("Failed to decode message from #{msg.topic}: #{inspect(reason)}")
-        end
-      end
-    end)
+    if msg.reply_to do
+      handle_request_reply(msg)
+    else
+      handle_fire_and_forget(msg)
+    end
 
     {:noreply, state}
   end
 
-  @impl true
-  def handle_info({:nats, :disconnected}, state) do
-    Logger.warning("Disconnected from NATS, will reconnect")
-    Process.send_after(self(), :connect_retry, @reconnect_delay_ms)
-    {:noreply, %{state | subscriptions: [], conn: nil}}
+  defp handle_request_reply(msg) do
+    body = decode_body(msg.body)
+
+    result =
+      safe_process(msg.topic, body)
+
+    reply = build_reply(result)
+
+    case GenServer.call(Connection, :get_connection, 5000) do
+      {:ok, conn} -> Gnat.pub(conn, msg.reply_to, reply)
+      _ -> :ok
+    end
   end
 
-  @impl true
-  def handle_info({:nats, :connected}, state) do
-    Logger.info("Reconnected to NATS, re-subscribing")
-    {:noreply, state, {:continue, :connect}}
+  defp handle_fire_and_forget(msg) do
+    body = decode_body(msg.body)
+
+    case safe_process(msg.topic, body) do
+      {:ok, _data} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.error(
+          "[Memory Consumer] #{msg.topic} (fire-and-forget) failed: #{inspect(reason)}"
+        )
+    end
   end
 
-  @impl true
-  def handle_info(:reconnect, state) do
-    {:noreply, state, {:continue, :connect}}
+  # Store/DB exceptions must never kill the GenServer — they surface as
+  # error replies (or logged failures) instead.
+  defp safe_process(topic, body) do
+    process_message(topic, body)
+  rescue
+    e -> {:error, Exception.message(e)}
   end
 
-  # Message routing
-  defp route_message(message, topic) do
-    # Route decoded messages to appropriate handlers
-    Logger.debug("Routing message from #{topic}")
+  defp decode_body(body) do
+    case Jason.decode(body) do
+      {:ok, m} -> m
+      _ -> %{}
+    end
   end
 
-  # Request/reply handlers
-  # defp handle_task_list(msg, state) do
-  #   response =
-  #     case get_tasks() do
-  #       {:ok, tasks} ->
-  #         BotArmyRuntime.NATS.Reply.ok(%{"tasks" => tasks})
-  #
-  #       {:error, reason} ->
-  #         BotArmyRuntime.NATS.Reply.error(inspect(reason), :list_failed)
-  #     end
-  #
-  #   if state.conn do
-  #     Gnat.pub(state.conn, msg.reply_to, response)
-  #   end
-  # end
+  defp process_message("memory.record", body), do: handle_record(body)
+  defp process_message("memory.list", body), do: handle_list(body)
+  defp process_message("memory.clear", body), do: handle_clear(body)
+  defp process_message("memory.append", body), do: handle_append(body)
+  defp process_message("memory.entries", body), do: handle_entries(body)
+  defp process_message("soul.get", body), do: handle_soul_get(body)
+  defp process_message("soul.upsert", body), do: handle_soul_upsert(body)
+  defp process_message(_, _), do: {:error, :unknown_subject}
+
+  defp build_reply({:ok, data}), do: Reply.ok(data)
+  defp build_reply({:error, reason}), do: Reply.error(inspect(reason), :request_failed)
+
+  defp handle_record(body) do
+    opts = body["opts"] || %{}
+
+    attrs = %{
+      "session_id" => body["session_id"],
+      "tenant_id" => Map.get(opts, "tenant_id"),
+      "question" => body["question"],
+      "answer" => body["answer"],
+      "source" => Map.get(opts, "source"),
+      "meta" => Map.get(opts, "meta", %{})
+    }
+
+    case ExchangeStore.record(attrs) do
+      {:ok, exchange} -> {:ok, %{"id" => exchange.id}}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp handle_list(body) do
+    session_id = body["session_id"]
+    opts = body["opts"] || %{}
+
+    case ExchangeStore.list(session_id, opts) do
+      {:ok, history} -> {:ok, history}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp handle_clear(body) do
+    session_id = body["session_id"]
+    opts = body["opts"] || %{}
+
+    case ExchangeStore.clear(session_id, opts) do
+      {:ok, count} -> {:ok, %{"deleted" => count}}
+      _ -> {:ok, %{"status" => "cleared"}}
+    end
+  end
+
+  defp handle_append(body) do
+    data = body["data"] || %{}
+    opts = body["opts"] || %{}
+    scope = data["session_id"]
+
+    if scope do
+      attrs = [
+        scope: scope,
+        tenant_id: Map.get(opts, "tenant_id") || Tenant.default_tenant_id(),
+        user_id: Map.get(opts, "user_id"),
+        source: Map.get(opts, "source"),
+        kind: Map.get(opts, "kind", "thought"),
+        payload: Map.drop(data, ["session_id"])
+      ]
+
+      case MemoryEntryStore.append(attrs, Map.get(opts, "limit", 10)) do
+        {:ok, id} -> {:ok, %{"id" => id}}
+        {:error, reason} -> {:error, reason}
+      end
+    else
+      {:error, :missing_scope}
+    end
+  end
+
+  defp handle_entries(body) do
+    scope = body["scope"] || body["session_id"]
+    opts = body["opts"] || %{}
+
+    case MemoryEntryStore.list(scope, opts) do
+      {:ok, entries} -> {:ok, entries}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp handle_soul_get(body) do
+    bot_id = normalize_bot_id(body["bot_id"])
+    tenant_id = Map.get(body, "tenant_id") || Tenant.default_tenant_id()
+
+    case SoulStore.get(bot_id, tenant_id) do
+      # Absence is not an error: reply {:ok, nil} and let the caller decide.
+      nil -> {:ok, nil}
+      soul -> {:ok, soul}
+    end
+  end
+
+  defp handle_soul_upsert(body) do
+    bot_id = normalize_bot_id(body["bot_id"])
+    config = body["config"]
+    tenant_id = Map.get(body, "tenant_id") || Tenant.default_tenant_id()
+
+    case SoulStore.upsert(bot_id, config, tenant_id) do
+      {:ok, soul} -> {:ok, %{"id" => soul.id, "version" => soul.version}}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  # Old runtime semantics: souls are stored WITHOUT the "bot_army_" prefix
+  # ("bot_army_gtd" -> "gtd"). Keep accepting both shapes.
+  defp normalize_bot_id(bot_id) when is_atom(bot_id),
+    do: bot_id |> Atom.to_string() |> String.replace_prefix("bot_army_", "")
+
+  defp normalize_bot_id(bot_id) when is_binary(bot_id),
+    do: String.replace_prefix(bot_id, "bot_army_", "")
+
+  defp normalize_bot_id(_), do: nil
 end
