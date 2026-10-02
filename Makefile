@@ -28,9 +28,16 @@ help:
 	@echo "  make release         - Build OTP release locally"
 	@echo "  make publish-release - Build, package, and publish to GitHub"
 	@echo ""
+	@echo "Shared targets (from bot_army_infra/make/common.mk):"
+	@echo "  make bump-version    - Bump mix.exs version (BUMP=major|minor|patch)"
+	@echo "  make push            - Validate (test, compile, credo) then push, with proof file"
+	@echo "  make git-push        - Push only, no validation"
+	@echo "  make compile         - Compile (logs to /tmp)"
+	@echo ""
 	@echo "Normal workflow:"
-	@echo "  git push             - Fast compile+test validation"
-	@echo "  make push-and-publish - Push then publish release asset"
+	@echo "  make bump-version BUMP=patch  - Every change gets a version bump"
+	@echo "  make push                     - Validate + push (not a bare git push)"
+	@echo "  make publish-release          - Publish the release asset"
 	@echo ""
 
 setup: init deps setup-hooks setup-db
