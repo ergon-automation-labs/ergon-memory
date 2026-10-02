@@ -1,7 +1,7 @@
 SCRIPTS_DIRECTORY ?= $(abspath $(CURDIR)/../scripts)
 MIX ?= /Users/abby/.local/share/mise/shims/mix
 
-.PHONY: setup help deps test credo dialyzer coverage check format clean release publish-release setup-hooks setup-db reset-db logs push-and-publish
+.PHONY: setup help deps test dialyzer coverage check format clean release publish-release setup-db reset-db logs push-and-publish _compile-impl
 
 help:
 	@echo "Memory Bot"
@@ -42,10 +42,6 @@ setup: init deps setup-hooks setup-db
 	@echo "  3. Start developing!"
 	@echo ""
 
-setup-hooks:
-	@git config core.hooksPath git-hooks
-	@echo "✓ Git hooks installed (core.hooksPath = git-hooks)"
-
 setup-db:
 	@echo "Setting up test database..."
 	@MIX_ENV=test $(MIX) ecto.create || true
@@ -68,8 +64,14 @@ deps:
 test:
 	$(MIX) test
 
-credo:
-	$(MIX) credo
+# Called by the shared `compile` target (bot_army_infra/make/common.mk), which
+# `make push` depends on. Without it `make push` dies with
+# "No rule to make target '_compile-impl'".
+_compile-impl:
+	@LOG_FILE="/tmp/compile-full-$$(date +%s).log"; \
+	echo "Compiling and logging to $$LOG_FILE..."; \
+	$(MIX) compile 2>&1 | tee "$$LOG_FILE"; \
+	echo "✓ Compilation log: $$LOG_FILE"
 
 dialyzer: deps
 	$(MIX) dialyzer
@@ -145,7 +147,7 @@ publish-release: release
 	echo "Publishing deploy.release.requested to NATS..."; \
 	BOT_SHORT=$$(echo "memory_bot" | sed 's/_bot$$//'); \
 	REPO_SLUG=$$(git config --get remote.origin.url | sed -E 's#.*[:/]([^/]+/[^/]+)\.git#\1#'); \
-	MONOREPO_ROOT=$$($(call _FIND_MONOREPO_ROOT)); \
+	MONOREPO_ROOT=$$($(call _FIND_MONOREPO_ROOT) || true); \
 	NATS_PUBLISH_SCRIPT="$$MONOREPO_ROOT/bot_army_infra/salt/common/files/nats_publish.sh"; \
 	if [ -n "$$MONOREPO_ROOT" ] && [ -f "$$NATS_PUBLISH_SCRIPT" ]; then \
 		PAYLOAD=$$(printf '{"bot":"%s","repo":"%s","tag":"v%s","version":"%s"}' "$$BOT_SHORT" "$$REPO_SLUG" "$$VERSION" "$$VERSION"); \
@@ -173,20 +175,16 @@ _FIND_MONOREPO_ROOT = \
 		echo "$(MONOREPO_ROOT)"; \
 		exit 0; \
 	fi; \
-	if [ -d "../../../elixir_bots" ] && [ -f "../../../elixir_bots/Makefile" ]; then \
-		if grep -q "verify-bot-nats:" "../../../elixir_bots/Makefile"; then \
-			echo "$$(cd ../../../elixir_bots && pwd)"; \
-			exit 0; \
-		fi; \
-	fi; \
 	CURRENT_DIR=$$(pwd); \
 	while [ "$$CURRENT_DIR" != "/" ]; do \
-		if [ -f "$$CURRENT_DIR/Makefile" ] && grep -q "verify-bot-nats:" "$$CURRENT_DIR/Makefile"; then \
-			if [ -d "$$CURRENT_DIR/bots" ] || [ -d "$$CURRENT_DIR/bot_army_infra" ]; then \
-				echo "$$CURRENT_DIR"; \
-				exit 0; \
+		for CAND in "$$CURRENT_DIR" "$$CURRENT_DIR/../elixir_bots" "$$CURRENT_DIR/bots"; do \
+			if [ -f "$$CAND/Makefile" ] && { grep -q "verify-bot-nats:" "$$CAND/Makefile" || grep -rqs "verify-bot-nats:" "$$CAND/make" 2>/dev/null; }; then \
+				if [ -d "$$CAND/bots" ] || [ -d "$$CAND/bot_army_infra" ]; then \
+					echo "$$(cd "$$CAND" && pwd)"; \
+					exit 0; \
+				fi; \
 			fi; \
-		fi; \
+		done; \
 		CURRENT_DIR=$$(dirname "$$CURRENT_DIR"); \
 	done; \
 	echo ""; \
@@ -221,3 +219,18 @@ verify-bot-nats:
 	}; \
 	BOT_NAME=$$(basename $$(pwd) | sed 's/bot_army_//'); \
 	$(MAKE) -C "$$MONOREPO_ROOT" verify-bot-nats BOT=$$BOT_NAME
+
+
+# ── Shared targets (push, credo, setup-hooks, compile, pre-push-cleanup,
+# bump-version, git-push). Defined once in bot_army_infra so they cannot drift
+# per repo. This was the only one of 75 bot repos missing the include: it had no
+# bump-version / push / git-push at all, and its `publish-release` called the
+# unguarded `_FIND_MONOREPO_ROOT` under `set -e`, so it exited 1 *after*
+# successfully publishing the GitHub release (runbook
+# DEPLOY_REQUEST_SILENT_FAILURES.md, defect #4).
+BOT_ARMY_COMMON_MK := $(abspath $(CURDIR)/../bot_army_infra/make/common.mk)
+ifeq ($(wildcard $(BOT_ARMY_COMMON_MK)),)
+$(warning bot_army_infra not found at $(BOT_ARMY_COMMON_MK) - shared targets unavailable)
+else
+include $(BOT_ARMY_COMMON_MK)
+endif
