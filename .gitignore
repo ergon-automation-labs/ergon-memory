@@ -3,3 +3,5 @@ deps/
 *.tar.gz
 erl_crash.dump
 /.elixir_ls/
+/.cache/
+.compile-hash
