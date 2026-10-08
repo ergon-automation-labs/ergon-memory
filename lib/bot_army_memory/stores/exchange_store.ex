@@ -62,5 +62,5 @@ defmodule BotArmyMemory.Stores.ExchangeStore do
   # timestamps() defaults to :naive_datetime in this repo — handle both
   # naive and tz-aware forms.
   defp to_iso8601(%DateTime{} = dt), do: DateTime.to_iso8601(dt)
-  defp to_iso8601(%NaiveDateTime{} = dt), do: NaiveDateTime.to_iso8601(dt)
+  defp to_iso8601(%NaiveDateTime{} = dt), do: BotArmyLibraryRuntime.Timestamp.utc_iso8601(dt)
 end

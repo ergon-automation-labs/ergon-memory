@@ -161,7 +161,7 @@ defmodule BotArmyMemory.Stores.MemoryEntryStore do
         {"at", DateTime.to_iso8601(dt)}
 
       {"recorded_at", %NaiveDateTime{} = dt} ->
-        {"at", NaiveDateTime.to_iso8601(dt)}
+        {"at", BotArmyLibraryRuntime.Timestamp.utc_iso8601(dt)}
 
       {"tenant_id", binary} when is_binary(binary) and byte_size(binary) == 16 ->
         {"tenant_id", Ecto.UUID.load!(binary)}
