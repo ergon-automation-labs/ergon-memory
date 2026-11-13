@@ -21,7 +21,9 @@ defmodule BotArmyMemory.SoulChat do
 
   require Logger
 
+  alias BotArmyLibraryRuntime.NATS.Publisher
   alias BotArmyLibraryRuntime.Tenant
+  alias BotArmyMemory.SoulReads
   alias BotArmyMemory.Stores.SoulStore
 
   @max_turns 12
@@ -35,10 +37,9 @@ defmodule BotArmyMemory.SoulChat do
   You are one voice in a small household system that helps the person you are talking to
   get through her days. She has ADHD. These rules come before your own character:
 
-  - Say what you know and what you cannot see. You cannot read your bot's records in this
-    conversation. If she asks for a fact from them (what is due, what she did, a number),
-    say plainly that you cannot see it from here yet. Never invent a task, a date, a count
-    or a name.
+  - Say what you know and what you cannot see. Never invent a task, a date, a count, a
+    weight or a name. Facts come only from the "What you can see" section below, if there
+    is one; anything not in it, say plainly that you cannot see it from here.
   - No shame. Never say overdue, behind, broken streak, or "you should have". Something
     stale gets "is this still true?", not an accusation.
   - Short. One next thing, not a list. If something is big, offer the smallest first step.
@@ -83,17 +84,21 @@ defmodule BotArmyMemory.SoulChat do
   def chat(body, opts \\ []) do
     get_fn = Keyword.get(opts, :get_fn, &SoulStore.get/2)
 
+    request_fn = Keyword.get(opts, :request_fn, &Publisher.request/3)
+    now = Keyword.get(opts, :now, DateTime.utc_now())
+
     with {:ok, bot_id} <- bot_id(body),
          {:ok, messages} <- messages(body),
          {:ok, soul} <- talkable_soul(get_fn.(bot_id, tenant(body))),
-         {:ok, text} <- ask(system_prompt(soul), messages, opts) do
+         seen = SoulReads.take(soul["config"] || %{}, request_fn, now),
+         {:ok, text} <- ask(system_prompt(soul, seen, now), messages, opts) do
       {:ok, %{"bot_id" => bot_id, "name" => name(soul), "reply" => text}}
     end
   end
 
   @doc "The system prompt for a soul: the shared voice, then the soul's own character."
-  @spec system_prompt(map()) :: String.t()
-  def system_prompt(soul) do
+  @spec system_prompt(map(), [String.t()], DateTime.t()) :: String.t()
+  def system_prompt(soul, seen \\ [], now \\ DateTime.utc_now()) do
     config = soul["config"] || %{}
 
     character =
@@ -108,7 +113,24 @@ defmodule BotArmyMemory.SoulChat do
       |> Enum.reject(fn {_k, v} -> v in [nil, ""] end)
       |> Enum.map_join("\n", fn {k, v} -> "#{k}: #{v}" end)
 
-    @base_voice <> "\n" <> character
+    @base_voice <> "\n" <> character <> "\n\n" <> seen_section(seen, now)
+  end
+
+  defp seen_section([], _now) do
+    "What you can see: nothing. You cannot read your bot's records in this conversation. " <>
+      "If she asks for a fact from them, say you cannot see it from here yet."
+  end
+
+  defp seen_section(blocks, now) do
+    """
+    What you can see. Read just now from the house's bots (it is #{Calendar.strftime(now, "%A %Y-%m-%d %H:%M")} UTC; every
+    time below is UTC too). This is the truth for this turn. Quote numbers and names exactly as
+    they are here; never add a row, a date or a count that is not here. Do not read the whole
+    list back — pick the one thing that helps. A section marked "could NOT be read" means you
+    do not know what is in it.
+
+    #{Enum.join(blocks, "\n\n")}
+    """
   end
 
   # -- validation ---------------------------------------------------------------------------
@@ -163,7 +185,7 @@ defmodule BotArmyMemory.SoulChat do
   # -- the model ----------------------------------------------------------------------------
 
   defp ask(system, messages, opts) do
-    request_fn = Keyword.get(opts, :request_fn, &BotArmyLibraryRuntime.NATS.Publisher.request/3)
+    request_fn = Keyword.get(opts, :request_fn, &Publisher.request/3)
 
     payload = %{
       "system" => system,
@@ -187,7 +209,7 @@ defmodule BotArmyMemory.SoulChat do
   end
 
   defp poll(job_id, deadline, misses, opts) do
-    request_fn = Keyword.get(opts, :request_fn, &BotArmyLibraryRuntime.NATS.Publisher.request/3)
+    request_fn = Keyword.get(opts, :request_fn, &Publisher.request/3)
     sleep_fn = Keyword.get(opts, :sleep_fn, &Process.sleep/1)
 
     if System.monotonic_time(:millisecond) > deadline do
