@@ -11,6 +11,8 @@ defmodule BotArmyMemory.NATS.Consumer do
     memory.entries  read back a session's appended entries
     soul.get        active personality config for a bot
     soul.upsert     store a new versioned personality config
+    soul.list       the talkable cast (souls whose config says "talkable": true)
+    soul.chat       one turn of conversation with a soul (see BotArmyMemory.SoulChat)
 
   Messages WITH a reply_to get request-reply handling; messages without
   one (fire-and-forget publishes, e.g. Memory.record_exchange/4) are
@@ -31,8 +33,14 @@ defmodule BotArmyMemory.NATS.Consumer do
     %{subject: "memory.append", type: :request_reply},
     %{subject: "memory.entries", type: :request_reply},
     %{subject: "soul.get", type: :request_reply},
-    %{subject: "soul.upsert", type: :request_reply}
+    %{subject: "soul.upsert", type: :request_reply},
+    %{subject: "soul.list", type: :request_reply},
+    %{subject: "soul.chat", type: :request_reply}
   ]
+
+  # A model generation takes seconds to a minute; answered inline it would hold
+  # soul.get / memory.* for the whole fleet behind it.
+  @spawned_subjects ["soul.chat"]
 
   def start_link(opts \\ []) do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
@@ -86,10 +94,15 @@ defmodule BotArmyMemory.NATS.Consumer do
 
   @impl true
   def handle_info({:msg, msg}, state) do
-    if msg.reply_to do
-      handle_request_reply(msg)
-    else
-      handle_fire_and_forget(msg)
+    cond do
+      msg.reply_to && msg.topic in @spawned_subjects ->
+        Task.start(fn -> handle_request_reply(msg) end)
+
+      msg.reply_to ->
+        handle_request_reply(msg)
+
+      true ->
+        handle_fire_and_forget(msg)
     end
 
     {:noreply, state}
@@ -145,6 +158,8 @@ defmodule BotArmyMemory.NATS.Consumer do
   defp process_message("memory.entries", body), do: handle_entries(body)
   defp process_message("soul.get", body), do: handle_soul_get(body)
   defp process_message("soul.upsert", body), do: handle_soul_upsert(body)
+  defp process_message("soul.list", body), do: BotArmyMemory.SoulChat.cast(body)
+  defp process_message("soul.chat", body), do: BotArmyMemory.SoulChat.chat(body)
   defp process_message(_, _), do: {:error, :unknown_subject}
 
   defp build_reply({:ok, data}), do: Reply.ok(data)

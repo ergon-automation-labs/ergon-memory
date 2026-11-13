@@ -19,6 +19,18 @@ defmodule BotArmyMemory.Stores.SoulStoreTest do
     end
   end
 
+  describe "list/1" do
+    test "returns the tenant's active souls as maps", %{bot_id: bot_id, tenant_id: tenant_id} do
+      {:ok, _} = SoulStore.upsert(bot_id, %{"identity" => %{"name" => "Listed"}}, tenant_id)
+
+      assert Enum.any?(SoulStore.list(tenant_id), fn soul ->
+               soul["bot_id"] == bot_id and soul["config"]["identity"]["name"] == "Listed"
+             end)
+
+      assert SoulStore.list(Ecto.UUID.generate()) == []
+    end
+  end
+
   describe "upsert/3" do
     test "inserts version 1 and get returns its config", %{bot_id: bot_id, tenant_id: tenant_id} do
       config = %{"identity" => %{"name" => "Test Bot"}, "tone" => "dry"}
@@ -50,7 +62,9 @@ defmodule BotArmyMemory.Stores.SoulStoreTest do
     end
 
     test "rejects a config without an identity field", %{bot_id: bot_id, tenant_id: tenant_id} do
-      assert {:error, _changeset} = SoulStore.upsert(bot_id, %{"tone" => "no identity"}, tenant_id)
+      assert {:error, _changeset} =
+               SoulStore.upsert(bot_id, %{"tone" => "no identity"}, tenant_id)
+
       # Nothing was written
       assert SoulStore.get(bot_id, tenant_id) == nil
     end

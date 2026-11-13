@@ -17,15 +17,23 @@ defmodule BotArmyMemory.Stores.SoulStore do
   """
   def get(bot_id, tenant_id) do
     query =
-      from s in Soul,
+      from(s in Soul,
         where: s.bot_id == ^bot_id and s.tenant_id == ^tenant_id and s.active,
         order_by: [desc: s.version],
         limit: 1
+      )
 
     case Repo.one(query) do
       nil -> nil
       soul -> row_to_map(soul)
     end
+  end
+
+  @doc "Every active soul for a tenant, as plain maps."
+  def list(tenant_id) do
+    from(s in Soul, where: s.tenant_id == ^tenant_id and s.active, order_by: s.bot_id)
+    |> Repo.all()
+    |> Enum.map(&row_to_map/1)
   end
 
   @doc """
