@@ -113,6 +113,10 @@ defmodule BotArmyMemory.SoulReadsTest do
     blind = SoulChat.system_prompt(soul, [], @now)
     assert blind =~ "What you can see: nothing"
 
+    # Every voice is told it can look and not touch, so it never offers a press it cannot make.
+    assert blind =~ "you cannot change anything"
+    assert blind =~ "Never offer to"
+
     seeing = SoulChat.system_prompt(soul, ["## chores — read …\n[]"], @now)
     assert seeing =~ "Thursday 2026-11-12 17:40"
     assert seeing =~ "Quote numbers and names exactly"
